@@ -1,0 +1,94 @@
+import discord
+from discord.ext import commands
+import asyncio
+import gamertag_functions as gt
+import concurrent.futures
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=100)
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+
+@bot.command()
+async def check(ctx, username: str):
+    """Check if a gamertag is available"""
+    if not gt.is_valid_username(username):
+        await ctx.send("❌ Invalid username format. Must be 1-12 characters, start with letter, end with letter/number, no double spaces.")
+        return
+    
+    # Run blocking call in executor
+    loop = asyncio.get_event_loop()
+    availability, response = await loop.run_in_executor(executor, gt.check_username_availability, username)
+    
+    if availability:
+        await ctx.send(f"✅ **Gamertag '{username}' seems to be available!**")
+        gt.save_valid_username_to_file(username, len(username), str(ctx.author.id))
+        # Also send a DM to the user
+        try:
+            await ctx.author.send(f"✅ Found available gamertag: `{username}`")
+        except:
+            pass
+    elif availability is False:
+        await ctx.send(f"❌ Gamertag '{username}' is not available!")
+    else:
+        await ctx.send(f"⚠️ Error checking '{username}': {response}")
+
+@bot.command()
+async def generate(ctx, length: int, number: int, include_numbers: bool = False):
+    """Generate and check random gamertags (faster with concurrent checking)"""
+    if length < 3 or length > 12:
+        await ctx.send("❌ Length must be between 3 and 12.")
+        return
+    if number < 1 or number > 100:  # Increased limit
+        await ctx.send("❌ Number must be between 1 and 100.")
+        return
+
+    await ctx.send(f"🔄 Generating and checking {number} {length}-letter gamertags...")
+
+    available = []
+    loop = asyncio.get_event_loop()
+    
+    # Generate usernames first
+    usernames = []
+    for _ in range(number):
+        if include_numbers:
+            username = gt.generate_username_with_numbers(length)
+        else:
+            username = gt.generate_username(length)
+        if gt.is_valid_username(username):
+            usernames.append(username)
+    
+    # Check all in parallel
+    def check_username(username):
+        availability, _ = gt.check_username_availability(username)
+        return username, availability
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        futures = [loop.run_in_executor(executor, check_username, username) for username in usernames[:number]]
+        for future in asyncio.as_completed(futures):
+            username, availability = await future
+            if availability:
+                available.append(username)
+                gt.save_valid_username_to_file(username, length, str(ctx.author.id))
+                # Send DM for each found gamertag
+                try:
+                    await ctx.author.send(f"✅ **Found available gamertag: `{username}`**")
+                except:
+                    pass
+
+    if available:
+        response = f"✅ **Found {len(available)} available gamertag{'s' if len(available) != 1 else ''}:**\n" + "\n".join(available[:20])
+        if len(available) > 20:
+            response += f"\n... and {len(available)-20} more (check DMs)"
+    else:
+        response = "❌ No available gamertags found."
+
+    await ctx.send(response)
+
+# Replace 'YOUR_BOT_TOKEN' with your actual bot token
+bot.run('')
